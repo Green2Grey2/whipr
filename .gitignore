@@ -1,8 +1,34 @@
+# Dependencies
 node_modules/
+
+# Build outputs
 dist/
 .svelte-kit/
-.vscode/
-.DS_Store
-*.log
 src-tauri/target/
 src-tauri/.tauri/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Testing
+coverage/
+
+# Temporary
+*.tmp
+*.temp
