@@ -4,6 +4,11 @@
     "features": ["metal"]
   },
   "bundle": {
-    "targets": ["app", "dmg"]
+    "targets": ["app", "dmg"],
+    "category": "public.app-category.utilities",
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "license": "../LICENSE"
+    }
   }
 }

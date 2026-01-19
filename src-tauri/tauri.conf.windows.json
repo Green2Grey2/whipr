@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Whispr",
+  "productName": "Whipr",
   "version": "0.1.0",
-  "identifier": "com.whispr.app",
+  "identifier": "com.whipr.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Whispr",
+        "title": "Whipr",
         "width": 1000,
         "height": 720,
         "minWidth": 360,
@@ -28,6 +28,17 @@
   "bundle": {
     "active": true,
     "targets": ["msi", "nsis"],
-    "icon": ["icons/icon.png", "icons/icon.ico"]
+    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "category": "Utility",
+    "shortDescription": "Fast, private voice transcription",
+    "longDescription": "Whipr is a desktop application for fast, local voice transcription. Press a hotkey, speak, and your words are transcribed and pasted directly into any application. All processing happens on your machine.",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "license": "../LICENSE",
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "icons/icon.png"
+      }
+    }
   }
 }
