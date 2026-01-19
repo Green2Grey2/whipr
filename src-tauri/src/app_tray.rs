@@ -95,13 +95,15 @@ pub fn refresh_tray(_app: &AppHandle, _state: &Mutex<AppState>) {}
 #[cfg(target_os = "windows")]
 pub fn handle_window_event(window: &Window, event: &WindowEvent) {
   if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-    let app = window.app_handle();
-    let state = app.state::<Mutex<AppState>>();
-    if let Ok(guard) = state.lock() {
-      if guard.settings.app.close_to_tray {
-        let _ = window.hide();
-        api.prevent_close();
-      }
+    let close_to_tray = {
+      let app = window.app_handle();
+      let state = app.state::<Mutex<AppState>>();
+      let mutex = state.inner();
+      mutex.lock().ok().map(|g| g.settings.app.close_to_tray).unwrap_or(false)
+    };
+    if close_to_tray {
+      let _ = window.hide();
+      api.prevent_close();
     }
   }
 }
@@ -170,8 +172,9 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     cli::handle_action(app, cli::CliAction::Quit);
   } else if id == MENU_CLOSE_TO_TRAY_ID {
     let state = app.state::<Mutex<AppState>>();
+    let mutex = state.inner();
     let updated = {
-      let mut guard = match state.lock() {
+      let mut guard = match mutex.lock() {
         Ok(guard) => guard,
         Err(_) => return,
       };
@@ -182,7 +185,8 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     let _ = app.emit("settings-updated", updated);
   } else if let Some(transcript_id) = id.strip_prefix(MENU_RECENT_PREFIX) {
     let state = app.state::<Mutex<AppState>>();
-    if let Ok(guard) = state.lock() {
+    let mutex = state.inner();
+    if let Ok(guard) = mutex.lock() {
       if let Some(transcript) = guard.transcripts.iter().find(|item| item.id == transcript_id) {
         let _ = automation::copy_text(&transcript.text);
       }
