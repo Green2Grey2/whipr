@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "features": ["metal"]
+  },
+  "bundle": {
+    "targets": ["app", "dmg"]
+  }
+}

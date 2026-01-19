@@ -1,0 +1,7 @@
+{
+  "uuid": "whispr-overlay@greenuni",
+  "name": "Whispr Overlay",
+  "description": "Bottom-center recording status pill for Whispr.",
+  "shell-version": ["46"],
+  "version": 1
+}

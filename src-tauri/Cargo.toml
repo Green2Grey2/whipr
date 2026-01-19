@@ -1,0 +1,39 @@
+[package]
+name = "whispr"
+version = "0.1.0"
+description = "Whispr Linux alternative"
+authors = ["greenuni"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.5", features = [] }
+
+[dependencies]
+tauri = { version = "2.5", features = ["tray-icon", "image-png"] }
+tauri-plugin-global-shortcut = "2.3"
+tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+arboard = "3.6"
+enigo = "0.1"              # Keep 0.1.x - 0.6.x has breaking API changes
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "json"] }  # Keep 0.12.x - 0.13.x has breaking changes
+uuid = { version = "1", features = ["v4"] }
+cpal = "0.15"              # Keep 0.15.x - 0.17.x has breaking Sample trait changes
+whisper-rs = "0.15"
+rusqlite = { version = "0.31", features = ["bundled"] }
+symphonia = { version = "0.5", default-features = false, features = ["aac", "flac", "isomp4", "mp3", "ogg", "vorbis", "wav"] }
+hound = "3.5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+alsa = "0.9"
+alsa-sys = "0.3"
+
+[features]
+_gpu = ["whisper-rs/_gpu"]
+cuda = ["whisper-rs/cuda", "_gpu"]
+hipblas = ["whisper-rs/hipblas", "_gpu"]
+intel-sycl = ["whisper-rs/intel-sycl", "_gpu"]
+metal = ["whisper-rs/metal", "_gpu"]
+vulkan = ["whisper-rs/vulkan", "_gpu"]
+custom-protocol = ["tauri/custom-protocol"]

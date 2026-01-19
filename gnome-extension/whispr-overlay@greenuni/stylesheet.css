@@ -1,0 +1,71 @@
+.whispr-overlay {
+  background-color: rgba(0, 0, 0, 0.92);
+  border-radius: 999px;
+  padding: 10px 14px;
+  spacing: 12px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+
+.whispr-indicator {
+  padding: 0 6px;
+}
+
+.whispr-indicator-icon {
+  icon-size: 16px;
+  color: #e7e3e8;
+}
+
+.whispr-indicator-icon.whispr-indicator-recording {
+  color: #e36b70;
+}
+
+.whispr-indicator-icon.whispr-indicator-success {
+  color: #5ad08a;
+}
+
+.whispr-indicator-icon.whispr-indicator-error {
+  color: #f2b84b;
+}
+
+.whispr-overlay-button {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  background-color: #7f7a80;
+  color: #f2eef1;
+}
+
+.whispr-overlay-stop {
+  background-color: #e36b70;
+}
+
+.whispr-overlay-icon {
+  icon-size: 16px;
+}
+
+.whispr-overlay-meter {
+  spacing: 4px;
+  padding: 0 4px;
+}
+
+.whispr-overlay-bar {
+  width: 4px;
+  background-color: #ffffff;
+  border-radius: 4px;
+}
+
+.whispr-overlay-text {
+  spacing: 2px;
+  padding: 0 4px 0 2px;
+}
+
+.whispr-overlay-label {
+  color: #ffffff;
+  font-weight: 600;
+  font-size: 10pt;
+}
+
+.whispr-overlay-time {
+  color: #d8d8da;
+  font-size: 9pt;
+}
