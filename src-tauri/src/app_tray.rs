@@ -189,7 +189,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
 }
 
 #[cfg(target_os = "windows")]
-fn build_menu(app: &AppHandle, state: &AppState) -> Result<Menu, String> {
+fn build_menu(app: &AppHandle, state: &AppState) -> Result<Menu<tauri::Wry>, String> {
   let menu = Menu::new(app).map_err(|err| err.to_string())?;
   let record_accel = normalize_accelerator(&state.settings.hotkeys.record_toggle);
   let paste_accel = normalize_accelerator(&state.settings.hotkeys.paste_last);
@@ -282,7 +282,7 @@ fn normalize_accelerator(value: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn build_recents_submenu(app: &AppHandle, state: &AppState) -> Result<Submenu, tauri::Error> {
+fn build_recents_submenu(app: &AppHandle, state: &AppState) -> Result<Submenu<tauri::Wry>, tauri::Error> {
   let submenu = Submenu::with_id(app, MENU_RECENTS_ID, "Recent Transcriptions", true)?;
   let transcripts = state.transcripts.iter().take(MAX_RECENTS);
   let mut added = false;
