@@ -41,7 +41,10 @@ const PREVIEW_LEN: usize = 40;
 
 #[cfg(target_os = "windows")]
 pub fn setup_tray(app: &AppHandle, state: &Mutex<AppState>) -> Result<(), String> {
-  let menu = build_menu(app, state)?;
+  let menu = {
+    let guard = state.lock().map_err(|e| e.to_string())?;
+    build_menu(app, &guard)?
+  };
   let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
     .map_err(|err| err.to_string())?;
 
@@ -92,7 +95,8 @@ pub fn refresh_tray(_app: &AppHandle, _state: &Mutex<AppState>) {}
 #[cfg(target_os = "windows")]
 pub fn handle_window_event(window: &Window, event: &WindowEvent) {
   if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-    let state = window.app_handle().state::<Mutex<AppState>>();
+    let app = window.app_handle();
+    let state = app.state::<Mutex<AppState>>();
     if let Ok(guard) = state.lock() {
       if guard.settings.app.close_to_tray {
         let _ = window.hide();
@@ -165,8 +169,9 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
   } else if id == MENU_QUIT_ID {
     cli::handle_action(app, cli::CliAction::Quit);
   } else if id == MENU_CLOSE_TO_TRAY_ID {
+    let state = app.state::<Mutex<AppState>>();
     let updated = {
-      let mut guard = match app.state::<Mutex<AppState>>().lock() {
+      let mut guard = match state.lock() {
         Ok(guard) => guard,
         Err(_) => return,
       };
@@ -227,7 +232,7 @@ fn build_menu(app: &AppHandle, state: &AppState) -> Result<Menu<tauri::Wry>, Str
     .append(&PredefinedMenuItem::separator(app).map_err(|err| err.to_string())?)
     .map_err(|err| err.to_string())?;
 
-  let settings_item = MenuItem::with_id(app, MENU_SETTINGS_ID, "Settings", true, None)
+  let settings_item = MenuItem::with_id(app, MENU_SETTINGS_ID, "Settings", true, None::<&str>)
     .map_err(|err| err.to_string())?;
   let open_item = MenuItem::with_id(
     app,
@@ -255,7 +260,7 @@ fn build_menu(app: &AppHandle, state: &AppState) -> Result<Menu<tauri::Wry>, Str
     .append(&PredefinedMenuItem::separator(app).map_err(|err| err.to_string())?)
     .map_err(|err| err.to_string())?;
 
-  let quit_item = MenuItem::with_id(app, MENU_QUIT_ID, "Quit", true, None)
+  let quit_item = MenuItem::with_id(app, MENU_QUIT_ID, "Quit", true, None::<&str>)
     .map_err(|err| err.to_string())?;
   menu.append(&quit_item).map_err(|err| err.to_string())?;
 
@@ -294,14 +299,14 @@ fn build_recents_submenu(app: &AppHandle, state: &AppState) -> Result<Submenu<ta
       format!("{MENU_RECENT_PREFIX}{}", transcript.id),
       preview,
       true,
-      None,
+      None::<&str>,
     )?;
     submenu.append(&item)?;
     added = true;
   }
 
   if !added {
-    let empty = MenuItem::new(app, "No transcripts yet", false, None)?;
+    let empty = MenuItem::new(app, "No transcripts yet", false, None::<&str>)?;
     submenu.append(&empty)?;
   }
 
