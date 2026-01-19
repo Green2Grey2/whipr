@@ -53,6 +53,7 @@ jobs:
             librsvg2-dev \
             libasound2-dev \
             libssl-dev \
+            libxdo-dev \
             pkg-config
 
       - name: Install frontend dependencies

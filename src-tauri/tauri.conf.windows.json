@@ -34,10 +34,7 @@
     "longDescription": "Whipr is a desktop application for fast, local voice transcription. Press a hotkey, speak, and your words are transcribed and pasted directly into any application. All processing happens on your machine.",
     "windows": {
       "nsis": {
-        "installMode": "currentUser",
-        "license": "../LICENSE",
-        "installerIcon": "icons/icon.ico",
-        "headerImage": "icons/icon.png"
+        "installMode": "currentUser"
       }
     }
   }
