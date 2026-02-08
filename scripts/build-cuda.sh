@@ -1,9 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export CUDAToolkit_ROOT="/usr"
-export CUDA_HOME="/usr"
-export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+# Auto-detect CUDA location: prefer /usr/local/cuda-* installs over system package.
+if [ -z "${CUDA_HOME:-}" ]; then
+  if [ -d "/usr/local/cuda/bin" ]; then
+    export CUDA_HOME="/usr/local/cuda"
+  elif [ -x "/usr/bin/nvcc" ]; then
+    export CUDA_HOME="/usr"
+  else
+    echo "::error::Cannot find CUDA installation"
+    exit 1
+  fi
+fi
+
+export CUDAToolkit_ROOT="${CUDA_HOME}"
+export PATH="${CUDA_HOME}/bin:${PATH}"
+export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 
 if [ -n "${CMAKE_CUDA_ARCHITECTURES:-}" ]; then
   echo "Using CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}"
