@@ -102,8 +102,7 @@ fn detect_linux_drm_gpu_name() -> Option<String> {
 #[cfg(target_os = "windows")]
 fn detect_gpu_name_uncached() -> Option<String> {
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_DESC1,
-        DXGI_ADAPTER_FLAG_SOFTWARE,
+        CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
     };
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 

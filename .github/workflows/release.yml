@@ -52,6 +52,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          shared-key: ${{ matrix.name }}
 
       - name: Cache apt packages
         if: matrix.name == 'linux'
@@ -188,8 +189,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CMAKE_CUDA_ARCHITECTURES: "75;86;89;120"
-          PATH: /usr/local/cuda-12.8/bin:$PATH
-          LD_LIBRARY_PATH: /usr/local/cuda-12.8/lib64
+          CUDA_HOME: /usr/local/cuda-12.8
 
       - name: Rename CUDA artifacts
         run: |
