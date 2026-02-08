@@ -218,6 +218,32 @@ pub fn get_settings(state: State<'_, Mutex<AppState>>) -> Settings {
 }
 
 #[tauri::command]
+pub fn set_audio_input_device(
+  app: AppHandle,
+  state: State<'_, Mutex<AppState>>,
+  input_device_id: String,
+) -> Result<Settings, String> {
+  let input_device_id = input_device_id.trim().to_string();
+  if input_device_id.is_empty() {
+    return Err("Input device is required".to_string());
+  }
+
+  if !audio::input_device_available(&input_device_id) {
+    return Err(format!("Input device not available: {input_device_id}"));
+  }
+
+  let settings = {
+    let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+    guard.settings.audio.input_device_id = input_device_id;
+    storage::save_settings(&guard.settings)?;
+    guard.settings.clone()
+  };
+
+  let _ = app.emit("settings-updated", settings.clone());
+  Ok(settings)
+}
+
+#[tauri::command]
 pub fn save_settings(
   app: AppHandle,
   state: State<'_, Mutex<AppState>>,
@@ -228,6 +254,17 @@ pub fn save_settings(
     .map(|guard| guard.settings.clone())
     .map_err(|_| "state lock poisoned".to_string())?;
   let launch_changed = previous_settings.app.launch_on_login != settings.app.launch_on_login;
+  let transcription_context_changed =
+    previous_settings.transcription.model != settings.transcription.model
+      || previous_settings.transcription.model_dir != settings.transcription.model_dir
+      || previous_settings.transcription.use_gpu != settings.transcription.use_gpu;
+
+  if !audio::input_device_available(&settings.audio.input_device_id) {
+    return Err(format!(
+      "Input device not available: {}",
+      settings.audio.input_device_id
+    ));
+  }
 
   if launch_changed {
     autostart::apply_launch_on_login(settings.app.launch_on_login)
@@ -251,6 +288,14 @@ pub fn save_settings(
     let last_transcript_at_ms = guard.transcripts.first().map(|item| item.created_at);
     let _ = tray::write_recents(&guard.settings, &guard.transcripts, last_transcript_at_ms);
   }
+
+  if transcription_context_changed {
+    transcription::invalidate_context_cache();
+    if !previous_settings.transcription.use_gpu && settings.transcription.use_gpu {
+      transcription::clear_last_gpu_error();
+    }
+  }
+
   app_tray::refresh_tray(&app, state.inner());
   Ok(settings)
 }
@@ -281,7 +326,7 @@ pub fn search_transcripts(
   let query_embedding = embedding::embed_text(&query);
   let query_has_signal = query_embedding.iter().any(|value| *value != 0.0);
   let query_lower = query.to_lowercase();
-  let mut updated_embeddings = false;
+  let mut updated: Vec<Transcript> = Vec::new();
 
   let mut scored: Vec<(f32, Transcript)> = Vec::with_capacity(guard.transcripts.len());
   for transcript in guard.transcripts.iter_mut() {
@@ -290,7 +335,7 @@ pub fn search_transcripts(
     } else {
       let embedding = embedding::embed_text(&transcript.text);
       transcript.embedding = Some(embedding.clone());
-      updated_embeddings = true;
+      updated.push(transcript.clone());
       embedding
     };
 
@@ -314,10 +359,12 @@ pub fn search_transcripts(
     scored.push((score, transcript.clone()));
   }
 
-  if updated_embeddings {
-    storage::save_transcripts(&guard.settings, &guard.transcripts)?;
-  }
+  let settings = guard.settings.clone();
   drop(guard);
+
+  for transcript in updated.iter() {
+    let _ = storage::upsert_transcript(&settings, transcript);
+  }
 
   scored.sort_by(|a, b| {
     b.0.partial_cmp(&a.0)
@@ -412,7 +459,7 @@ pub fn update_transcript(
     }
 
     let cloned = transcript.clone();
-    storage::save_transcripts(&guard.settings, &guard.transcripts)?;
+    storage::upsert_transcript(&guard.settings, &cloned)?;
     let last_transcript_at_ms = guard.transcripts.first().map(|item| item.created_at);
     let _ = tray::write_recents(&guard.settings, &guard.transcripts, last_transcript_at_ms);
     cloned
@@ -427,7 +474,7 @@ pub fn delete_transcript(
   app: AppHandle,
   state: State<'_, Mutex<AppState>>,
   id: String,
-) -> Result<bool, String> {
+  ) -> Result<bool, String> {
   let (settings, removed) = {
     let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
     let index = guard
@@ -436,7 +483,10 @@ pub fn delete_transcript(
       .position(|item| item.id == id)
       .ok_or_else(|| "Transcript not found".to_string())?;
     let removed = guard.transcripts.remove(index);
-    storage::save_transcripts(&guard.settings, &guard.transcripts)?;
+    if let Err(err) = storage::delete_transcript_row(&guard.settings, &id) {
+      guard.transcripts.insert(index, removed.clone());
+      return Err(err);
+    }
     let last_transcript_at_ms = guard.transcripts.first().map(|item| item.created_at);
     let _ = tray::write_recents(&guard.settings, &guard.transcripts, last_transcript_at_ms);
     (guard.settings.clone(), removed)
@@ -463,7 +513,7 @@ pub fn clear_transcripts(
       .filter_map(|item| item.audio_path.clone())
       .collect::<Vec<_>>();
     guard.transcripts.clear();
-    storage::save_transcripts(&guard.settings, &guard.transcripts)?;
+    storage::clear_transcripts_table(&guard.settings)?;
     let _ = tray::write_recents(&guard.settings, &guard.transcripts, None);
     (guard.settings.clone(), audio_paths)
   };
@@ -551,8 +601,8 @@ pub fn import_audio_files(
 
     {
       let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
+      storage::upsert_transcript(&guard.settings, &transcript)?;
       guard.transcripts.insert(0, transcript.clone());
-      storage::save_transcripts(&guard.settings, &guard.transcripts)?;
       let last_transcript_at_ms = guard.transcripts.first().map(|item| item.created_at);
       let _ = tray::write_recents(&guard.settings, &guard.transcripts, last_transcript_at_ms);
     }
@@ -835,7 +885,10 @@ fn toggle_recording_with_state(state: &Mutex<AppState>) -> Result<ToggleOutcome,
 
   let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
   guard.transcripts.insert(0, transcript.clone());
-  storage::save_transcripts(&guard.settings, &guard.transcripts)?;
+  if let Err(err) = storage::upsert_transcript(&guard.settings, &transcript) {
+    guard.transcripts.retain(|item| item.id != transcript.id);
+    return Err(err);
+  }
   let _ = tray::write_recents(&guard.settings, &guard.transcripts, Some(created_at));
 
   let automation_settings = guard.settings.automation.clone();
@@ -959,6 +1012,7 @@ pub fn delete_model(
   state: State<'_, Mutex<AppState>>,
   model_id: String,
 ) -> Result<Vec<ModelInfo>, String> {
+  transcription::invalidate_context_cache();
   let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
   models::delete_model(&guard.settings, &model_id)?;
 
@@ -977,6 +1031,7 @@ pub fn delete_model(
   }
 
   storage::save_settings(&guard.settings)?;
+  transcription::invalidate_context_cache();
   Ok(models::list_models(&guard.settings))
 }
 
@@ -1032,6 +1087,7 @@ pub fn activate_model(
   let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
   models::activate_model(&mut guard.settings, &model_id)?;
   storage::save_settings(&guard.settings)?;
+  transcription::invalidate_context_cache();
   Ok(models::list_models(&guard.settings))
 }
 
@@ -1040,5 +1096,6 @@ pub fn cycle_model(state: State<'_, Mutex<AppState>>) -> Result<Vec<ModelInfo>, 
   let mut guard = state.lock().map_err(|_| "state lock poisoned".to_string())?;
   let _ = models::cycle_model(&mut guard.settings)?;
   storage::save_settings(&guard.settings)?;
+  transcription::invalidate_context_cache();
   Ok(models::list_models(&guard.settings))
 }

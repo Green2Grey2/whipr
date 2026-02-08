@@ -24,6 +24,7 @@
     importAudioFiles,
     pasteLastTranscript,
     saveSettings,
+    setAudioInputDevice,
     toggleRecording,
     listClips,
     createClip,
@@ -112,6 +113,7 @@
   let onboardingStep = 0;
   let settingsFocus: 'audio' | 'hotkeys' | 'automation' | 'app' | null = null;
   let settingsFocusTimer: number | null = null;
+  let audioDeviceSaveInFlight = false;
   let audioSectionEl: HTMLDivElement | null = null;
   let hotkeysSectionEl: HTMLDivElement | null = null;
   let automationSectionEl: HTMLDivElement | null = null;
@@ -485,6 +487,29 @@
       isRecording = false;
       stopTimer();
       errorMessage = error instanceof Error ? error.message : 'Failed to toggle recording.';
+    }
+  };
+
+  const handleAudioDeviceChange = async () => {
+    if (!settings) return;
+    if (audioDeviceSaveInFlight) return;
+
+    const nextId = settings.audio.input_device_id;
+    if (!nextId) return;
+    audioDeviceSaveInFlight = true;
+    errorMessage = '';
+
+    try {
+      // Persist immediately so recording uses this device right away and it survives relaunch.
+      settings = await setAudioInputDevice(nextId);
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : 'Failed to save input device.';
+      try {
+        // Reload last saved settings to keep UI consistent with backend.
+        settings = await getSettings();
+      } catch {}
+    } finally {
+      audioDeviceSaveInFlight = false;
     }
   };
 
@@ -1829,6 +1854,7 @@
                         id="input-device"
                         class="select-wide"
                         bind:value={settings.audio.input_device_id}
+                        on:change={handleAudioDeviceChange}
                       >
                         {#each audioDevices as device}
                           <option value={device.id}>{device.name}</option>

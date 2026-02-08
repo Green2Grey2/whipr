@@ -17,6 +17,24 @@ const LEGACY_TRANSCRIPTS_FILE: &str = "transcripts.json";
 const TRANSCRIPT_SOURCE: &str = "mic";
 const MILLIS_PER_DAY: i64 = 86_400_000;
 
+fn encode_tags(tags: &[String]) -> Result<Option<String>, String> {
+  if tags.is_empty() {
+    Ok(None)
+  } else {
+    Ok(Some(
+      serde_json::to_string(tags).map_err(|err| err.to_string())?,
+    ))
+  }
+}
+
+fn encode_embedding(embedding: &Option<Vec<f32>>) -> Result<Option<String>, String> {
+  embedding
+    .as_ref()
+    .map(|vector| serde_json::to_string(vector))
+    .transpose()
+    .map_err(|err| err.to_string())
+}
+
 pub fn expand_tilde(path: &str) -> PathBuf {
   let stripped = path
     .strip_prefix("~/")
@@ -609,6 +627,75 @@ pub fn save_transcripts(settings: &Settings, transcripts: &[Transcript]) -> Resu
   save_transcripts_to_conn(&mut conn, settings, transcripts)
 }
 
+pub fn upsert_transcript(settings: &Settings, transcript: &Transcript) -> Result<(), String> {
+  let path = db_path(settings);
+  let conn = open_connection(&path)?;
+  ensure_schema(&conn)?;
+
+  let language = if settings.transcription.language.is_empty() {
+    None
+  } else {
+    Some(settings.transcription.language.as_str())
+  };
+
+  let tags = encode_tags(&transcript.tags)?;
+  let embedding = encode_embedding(&transcript.embedding)?;
+
+  conn
+    .execute(
+      "INSERT INTO transcripts
+        (id, created_at, duration_ms, text, language, tags, title, summary, embedding, audio_path, source)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        ON CONFLICT(id) DO UPDATE SET
+          created_at = excluded.created_at,
+          duration_ms = excluded.duration_ms,
+          text = excluded.text,
+          language = excluded.language,
+          tags = excluded.tags,
+          title = excluded.title,
+          summary = excluded.summary,
+          embedding = excluded.embedding,
+          audio_path = excluded.audio_path,
+          source = excluded.source",
+      params![
+        transcript.id,
+        transcript.created_at,
+        transcript.duration_ms as i64,
+        transcript.text,
+        language,
+        tags,
+        transcript.title,
+        transcript.summary,
+        embedding,
+        transcript.audio_path,
+        TRANSCRIPT_SOURCE,
+      ],
+    )
+    .map_err(|err| err.to_string())?;
+
+  Ok(())
+}
+
+pub fn delete_transcript_row(settings: &Settings, id: &str) -> Result<(), String> {
+  let path = db_path(settings);
+  let conn = open_connection(&path)?;
+  ensure_schema(&conn)?;
+  conn
+    .execute("DELETE FROM transcripts WHERE id = ?1", params![id])
+    .map_err(|err| err.to_string())?;
+  Ok(())
+}
+
+pub fn clear_transcripts_table(settings: &Settings) -> Result<(), String> {
+  let path = db_path(settings);
+  let conn = open_connection(&path)?;
+  ensure_schema(&conn)?;
+  conn
+    .execute("DELETE FROM transcripts", [])
+    .map_err(|err| err.to_string())?;
+  Ok(())
+}
+
 pub fn insert_clip(settings: &Settings, clip: &Clip) -> Result<(), String> {
   let path = db_path(settings);
   let conn = open_connection(&path)?;
@@ -643,6 +730,7 @@ pub fn delete_clip(settings: &Settings, id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use uuid::Uuid;
 
   #[test]
   fn expand_tilde_handles_windows_separator() {
@@ -657,5 +745,38 @@ mod tests {
     } else {
       std::env::remove_var("HOME");
     }
+  }
+
+  #[test]
+  fn upsert_and_delete_transcript_roundtrip() {
+    let mut settings = Settings::default();
+    let dir = std::env::temp_dir().join(format!("whispr-test-{}", Uuid::new_v4()));
+    settings.storage.data_dir = dir.to_string_lossy().to_string();
+
+    let transcript = Transcript {
+      id: Uuid::new_v4().to_string(),
+      created_at: 123,
+      duration_ms: 456,
+      text: "hello world".to_string(),
+      title: Some("hello".to_string()),
+      summary: None,
+      tags: vec!["a".to_string(), "b".to_string()],
+      audio_path: None,
+      embedding: Some(vec![0.1, 0.2, 0.3]),
+    };
+
+    upsert_transcript(&settings, &transcript).expect("upsert");
+    let loaded = load_transcripts(&settings);
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].id, transcript.id);
+    assert_eq!(loaded[0].text, transcript.text);
+    assert_eq!(loaded[0].tags, transcript.tags);
+    assert!(loaded[0].embedding.is_some());
+
+    delete_transcript_row(&settings, &transcript.id).expect("delete");
+    let loaded = load_transcripts(&settings);
+    assert!(loaded.is_empty());
+
+    let _ = fs::remove_dir_all(&dir);
   }
 }

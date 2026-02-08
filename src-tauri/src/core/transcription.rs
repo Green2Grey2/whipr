@@ -12,9 +12,22 @@ const GPU_FALLBACK_PREFIX: &str = "GPU init failed, falling back to CPU: ";
 
 static LAST_GPU_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ContextKey {
+  model_path: String,
+  wants_gpu: bool,
+}
+
+struct CachedContext {
+  key: ContextKey,
+  ctx: WhisperContext,
+  used_gpu: bool,
+}
+
+static CONTEXT_CACHE: OnceLock<Mutex<Option<CachedContext>>> = OnceLock::new();
+
 pub fn transcribe(settings: &Settings, audio: RecordedAudio) -> Result<String, String> {
-  let ctx = build_context(settings)?;
-  transcribe_with_context(&ctx, settings, audio, None)
+  with_cached_context(settings, |ctx| transcribe_with_context(ctx, settings, audio, None))
 }
 
 pub fn transcribe_preview_with_context(
@@ -51,6 +64,67 @@ fn set_last_gpu_error(value: Option<String>) {
   if let Ok(mut guard) = store.lock() {
     *guard = value;
   }
+}
+
+pub fn clear_last_gpu_error() {
+  set_last_gpu_error(None);
+}
+
+pub fn invalidate_context_cache() {
+  let cache = CONTEXT_CACHE.get_or_init(|| Mutex::new(None));
+  if let Ok(mut guard) = cache.lock() {
+    *guard = None;
+  }
+}
+
+fn with_cached_context<T, F>(settings: &Settings, f: F) -> Result<T, String>
+where
+  F: FnOnce(&WhisperContext) -> Result<T, String>,
+{
+  let model_path = models::resolve_model_path(settings, &settings.transcription.model)?;
+  let model_path = model_path
+    .to_str()
+    .ok_or_else(|| "Model path is not valid UTF-8".to_string())?
+    .to_string();
+  let gpu_supported = cfg!(feature = "_gpu");
+  let wants_gpu = settings.transcription.use_gpu && gpu_supported;
+
+  let key = ContextKey {
+    model_path: model_path.clone(),
+    wants_gpu,
+  };
+
+  let cache = CONTEXT_CACHE.get_or_init(|| Mutex::new(None));
+  let mut guard = cache
+    .lock()
+    .map_err(|_| "transcription context cache lock poisoned".to_string())?;
+
+  let should_rebuild = match guard.as_ref() {
+    Some(cached) => cached.key != key,
+    None => true,
+  };
+
+  if should_rebuild {
+    let (ctx, used_gpu) = build_with_fallback(wants_gpu, |use_gpu| {
+      build_context_with_params(&model_path, use_gpu)
+    })?;
+    *guard = Some(CachedContext { key, ctx, used_gpu });
+  }
+
+  // If GPU init failed earlier, we cache the CPU context under the wants_gpu=true key to avoid
+  // retrying GPU on every transcription. Users can retry by toggling GPU (which should invalidate).
+  if let Some(cached) = guard.as_ref() {
+    if cached.used_gpu == false && wants_gpu {
+      // Keep last GPU error visible; nothing to do here.
+    }
+  }
+
+  let ctx = &guard
+    .as_ref()
+    .ok_or_else(|| "Failed to build transcription context".to_string())?
+    .ctx;
+
+  f(ctx)
 }
 
 fn build_context_with_params(model_path: &str, use_gpu: bool) -> Result<WhisperContext, String> {

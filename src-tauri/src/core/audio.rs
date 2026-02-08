@@ -169,6 +169,24 @@ pub fn list_input_devices() -> Vec<AudioDevice> {
   devices
 }
 
+pub fn input_device_available(input_device_id: &str) -> bool {
+  silence_alsa_errors();
+  let host = cpal::default_host();
+  if input_device_id == "default" {
+    return host.default_input_device().is_some();
+  }
+
+  match host.input_devices() {
+    Ok(mut devices) => devices.any(|device| {
+      device
+        .name()
+        .map(|name| name == input_device_id)
+        .unwrap_or(false)
+    }),
+    Err(_) => false,
+  }
+}
+
 fn should_include_device_name(name: &str) -> bool {
   let lower = name.to_lowercase();
   let blocked_prefixes = [
@@ -403,6 +421,9 @@ fn select_device(host: &cpal::Host, input_device_id: &str) -> Result<cpal::Devic
         return Ok(device);
       }
     }
+
+    // Avoid silently recording from a different microphone than the user selected.
+    return Err(format!("Input device not found: {input_device_id}"));
   }
 
   host
