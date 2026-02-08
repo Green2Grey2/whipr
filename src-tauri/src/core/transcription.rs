@@ -1,3 +1,7 @@
+#[cfg(target_os = "linux")]
+use std::fs;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -11,6 +15,176 @@ const PREVIEW_MAX_SECONDS: f32 = 10.0;
 const GPU_FALLBACK_PREFIX: &str = "GPU init failed, falling back to CPU: ";
 
 static LAST_GPU_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static GPU_NAME: OnceLock<Option<String>> = OnceLock::new();
+
+pub fn detect_gpu_name() -> Option<String> {
+    GPU_NAME
+        .get_or_init(detect_gpu_name_uncached)
+        .as_ref()
+        .cloned()
+}
+
+#[cfg(target_os = "linux")]
+fn detect_gpu_name_uncached() -> Option<String> {
+    detect_linux_nvidia_gpu_name().or_else(detect_linux_drm_gpu_name)
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_nvidia_gpu_name() -> Option<String> {
+    let entries = fs::read_dir("/proc/driver/nvidia/gpus").ok()?;
+    for entry in entries.flatten() {
+        let info_path = entry.path().join("information");
+        if let Ok(text) = fs::read_to_string(info_path) {
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if let Some(value) = trimmed
+                    .strip_prefix("Model:")
+                    .or_else(|| trimmed.strip_prefix("Model"))
+                {
+                    let name = value.trim().trim_start_matches(':').trim();
+                    if !name.is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_drm_gpu_name() -> Option<String> {
+    let entries = fs::read_dir("/sys/class/drm").ok()?;
+    let mut candidates: Vec<(u8, String)> = Vec::new();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Prefer real DRM cards; skip render nodes / connectors.
+        if !name.starts_with("card") || name.contains('-') {
+            continue;
+        }
+
+        let dev_path = entry.path().join("device");
+        let vendor_text = fs::read_to_string(dev_path.join("vendor")).ok();
+        let device_text = fs::read_to_string(dev_path.join("device")).ok();
+        let (vendor, device) = match (vendor_text, device_text) {
+            (Some(vendor), Some(device)) => (vendor, device),
+            _ => continue,
+        };
+
+        let vendor = vendor.trim().trim_start_matches("0x");
+        let device = device.trim().trim_start_matches("0x");
+        let vendor_id = match u16::from_str_radix(vendor, 16) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let device_id = match u16::from_str_radix(device, 16) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        let (rank, vendor_name) = match vendor_id {
+            0x10de => (0, "NVIDIA"),
+            0x1002 => (1, "AMD"),
+            0x8086 => (2, "Intel"),
+            _ => (3, "GPU"),
+        };
+        candidates.push((
+            rank,
+            format!("{vendor_name} ({vendor_id:04x}:{device_id:04x})"),
+        ));
+    }
+
+    candidates.sort_by_key(|(rank, _)| *rank);
+    candidates.first().map(|(_, value)| value.clone())
+}
+
+#[cfg(target_os = "windows")]
+fn detect_gpu_name_uncached() -> Option<String> {
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_DESC1,
+        DXGI_ADAPTER_FLAG_SOFTWARE,
+    };
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+
+    // Best-effort; if COM is already initialized in a different mode, we can still try DXGI.
+    let com_initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
+
+    let result = (|| {
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1().ok()? };
+        for index in 0..64_u32 {
+            let adapter: IDXGIAdapter1 = match unsafe { factory.EnumAdapters1(index) } {
+                Ok(adapter) => adapter,
+                Err(_) => break,
+            };
+
+            let mut desc = DXGI_ADAPTER_DESC1::default();
+            if unsafe { adapter.GetDesc1(&mut desc) }.is_err() {
+                continue;
+            }
+
+            if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+                continue;
+            }
+
+            let end = desc
+                .Description
+                .iter()
+                .position(|value| *value == 0)
+                .unwrap_or(desc.Description.len());
+            let name = String::from_utf16_lossy(&desc.Description[..end])
+                .trim()
+                .to_string();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+        None
+    })();
+
+    if com_initialized {
+        unsafe {
+            CoUninitialize();
+        }
+    }
+
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn detect_gpu_name_uncached() -> Option<String> {
+    let output = Command::new("system_profiler")
+        .args(["SPDisplaysDataType"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("Chipset Model:") {
+            let name = value.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+        if let Some(value) = trimmed.strip_prefix("Model:") {
+            let name = value.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+fn detect_gpu_name_uncached() -> Option<String> {
+    None
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ContextKey {
@@ -186,9 +360,22 @@ fn transcribe_with_context(
         params.set_initial_prompt(&sanitized);
     }
 
-    let mut mono = to_mono(&audio);
-    if audio.sample_rate != TARGET_SAMPLE_RATE {
-        mono = resample_linear(&mono, audio.sample_rate, TARGET_SAMPLE_RATE);
+    // `RecordedAudio` is already owned here, so avoid cloning the full buffer on the
+    // common mono path.
+    let RecordedAudio {
+        samples,
+        sample_rate,
+        channels,
+    } = audio;
+
+    let mut mono = if channels <= 1 {
+        samples
+    } else {
+        to_mono(&samples, channels)
+    };
+
+    if sample_rate != TARGET_SAMPLE_RATE {
+        mono = resample_linear(&mono, sample_rate, TARGET_SAMPLE_RATE);
     }
 
     if mono.is_empty() {
@@ -225,19 +412,19 @@ pub fn resolve_thread_count(settings: &Settings, thread_override: Option<u32>) -
         .unwrap_or(4)
 }
 
-fn to_mono(audio: &RecordedAudio) -> Vec<f32> {
-    if audio.channels <= 1 {
-        return audio.samples.clone();
+fn to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
+    let channels = channels.max(1) as usize;
+    if channels <= 1 {
+        return samples.to_vec();
     }
 
-    let channels = audio.channels as usize;
-    let frames = audio.samples.len() / channels;
+    let frames = samples.len() / channels;
     let mut mono = Vec::with_capacity(frames);
 
     for frame in 0..frames {
         let mut sum = 0.0_f32;
         for ch in 0..channels {
-            sum += audio.samples[frame * channels + ch];
+            sum += samples[frame * channels + ch];
         }
         mono.push(sum / channels as f32);
     }

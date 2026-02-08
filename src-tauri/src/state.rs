@@ -16,6 +16,7 @@ pub struct AppState {
     pub recording: bool,
     pub recording_started_at: Option<Instant>,
     pub preview_cancel: Option<Arc<AtomicBool>>,
+    pub ui_active: Arc<AtomicBool>,
     pub audio_tx: Sender<AudioCommand>,
     pub last_focus_window: Option<String>,
 }
@@ -26,6 +27,7 @@ impl AppState {
         let transcripts = load_transcripts_with_retention(&settings);
         let clips = load_clips(&settings);
         let audio_tx = audio::start_worker();
+        let ui_active = Arc::new(AtomicBool::new(false));
 
         Self {
             settings,
@@ -34,6 +36,7 @@ impl AppState {
             recording: false,
             recording_started_at: None,
             preview_cancel: None,
+            ui_active,
             audio_tx,
             last_focus_window: None,
         }

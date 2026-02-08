@@ -26,6 +26,7 @@
     importAudioFiles,
     pasteLastTranscript,
     saveSettings,
+    setUiActive,
     setAudioInputDevice,
     toggleRecording,
     listClips,
@@ -51,6 +52,7 @@
   import HotkeyInput from './lib/components/HotkeyInput.svelte';
   import Onboarding from './lib/components/Onboarding.svelte';
   import { onboardingSteps } from './lib/onboarding';
+  import transcriptionCompleteSoundUrl from './lib/assets/sounds/transcription-complete.mp3?url';
 
   let currentPage: 'home' | 'settings' | 'clips' = 'home';
   let search = '';
@@ -73,6 +75,9 @@
   let savingSettings = false;
   let errorMessage = '';
   let hotkeyWarning = '';
+  const WAYLAND_HOTKEYS_WARNING = 'Global hotkeys are not supported on Wayland.';
+  const WAYLAND_HOTKEYS_WARNING_DISMISSED_KEY = 'whispr.wayland_hotkeys_warning.dismissed';
+  let waylandHotkeysWarningDismissed = false;
   let modelBusyId: string | null = null;
   let recordingSeconds = 0;
   let timerInterval: number | null = null;
@@ -84,6 +89,7 @@
   let unlistenModelProgress: UnlistenFn | null = null;
   let unlistenImportProgress: UnlistenFn | null = null;
   let unlistenAutomationError: UnlistenFn | null = null;
+  let unlistenTranscriptionStarted: UnlistenFn | null = null;
   let deleteConfirmModel: ModelInfo | null = null;
   let clearConfirmOpen = false;
   let clearingTranscripts = false;
@@ -135,6 +141,21 @@
   let updateCheckTimer: number | null = null;
   let wlClipboardInstallOpen = false;
   let wlClipboardCopyError = '';
+
+  let transcriptionCompleteAudio: HTMLAudioElement | null = null;
+  let lastTranscriptionSoundAt = 0;
+
+  const playTranscriptionCompleteSound = () => {
+    if (!transcriptionCompleteAudio) return;
+    const now = Date.now();
+    // Prevent double-play if multiple triggers arrive close together.
+    if (now - lastTranscriptionSoundAt < 1200) return;
+    lastTranscriptionSoundAt = now;
+    try {
+      transcriptionCompleteAudio.currentTime = 0;
+    } catch {}
+    transcriptionCompleteAudio.play().catch(() => {});
+  };
 
   type NavState = { page: 'home' | 'settings' | 'clips' };
   const appWindow = getCurrentWindow();
@@ -295,6 +316,7 @@
   const startTranscriptListener = async () => {
     unlistenTranscript = await listen<Transcript>('transcript-created', (event) => {
       const incoming = event.payload;
+      if (!incoming) return;
       if (transcripts.some((item) => item.id === incoming.id)) return;
       transcripts = [incoming, ...transcripts];
       getStorageStats()
@@ -309,6 +331,24 @@
     unlistenPreview = await listen<PreviewEvent>('transcript-preview', (event) => {
       previewText = event.payload.text ?? '';
     });
+  };
+
+  let lastUiActive: boolean | null = null;
+  const computeUiActive = () => {
+    if (document.visibilityState !== 'visible') return false;
+    if (typeof document.hasFocus === 'function') return document.hasFocus();
+    return true;
+  };
+
+  const syncUiActive = async () => {
+    const next = computeUiActive();
+    if (lastUiActive === next) return;
+    lastUiActive = next;
+    try {
+      await setUiActive(next);
+    } catch {
+      // Best-effort; preview will fall back to always-on behavior if the backend can't track UI.
+    }
   };
 
   const startModelProgressListener = async () => {
@@ -358,9 +398,15 @@
     });
   };
 
+  const startTranscriptionStartedListener = async () => {
+    unlistenTranscriptionStarted = await listen('transcription-started', () => {
+      playTranscriptionCompleteSound();
+    });
+  };
+
   $: baseTranscripts = semanticSearchEnabled ? semanticResults : transcripts;
 
-  $: filteredTranscripts = baseTranscripts.filter((item) => {
+  $: filteredTranscripts = (() => {
     const now = Date.now();
     const cutoff = dateFilter === '7d'
       ? now - 7 * 24 * 60 * 60 * 1000
@@ -370,20 +416,23 @@
       ? now - 90 * 24 * 60 * 60 * 1000
       : null;
     const normalizedSearch = search.trim().toLowerCase();
-    const matchesSearch = semanticSearchEnabled || !normalizedSearch || [
-      item.text,
-      item.title ?? '',
-      item.summary ?? '',
-      item.tags.join(' '),
-    ].some((value) => value.toLowerCase().includes(normalizedSearch));
 
-    const matchesTags = activeTagFilters.length === 0
-      || activeTagFilters.some((tag) => item.tags.includes(tag));
+    return baseTranscripts.filter((item) => {
+      const matchesSearch = semanticSearchEnabled || !normalizedSearch || [
+        item.text,
+        item.title ?? '',
+        item.summary ?? '',
+        item.tags.join(' '),
+      ].some((value) => value.toLowerCase().includes(normalizedSearch));
 
-    const matchesDate = cutoff === null || item.created_at >= cutoff;
+      const matchesTags = activeTagFilters.length === 0
+        || activeTagFilters.some((tag) => item.tags.includes(tag));
 
-    return matchesSearch && matchesTags && matchesDate;
-  });
+      const matchesDate = cutoff === null || item.created_at >= cutoff;
+
+      return matchesSearch && matchesTags && matchesDate;
+    });
+  })();
 
   $: pasteUnavailable = runtimeInfo?.paste_method === 'unavailable';
   $: pasteLimited = runtimeInfo?.paste_method === 'clipboard_only';
@@ -397,16 +446,15 @@
   $: if (!gpuErrorMessage) {
     gpuErrorDismissed = '';
   }
-  $: statusLabel = (() => {
-    if (isRecording) return `Recording... ${formatElapsed(recordingSeconds)}`;
-    if (!runtimeInfo) return 'Ready';
-    if (runtimeInfo.session_type === 'wayland') {
-      if (!runtimeInfo.hotkeys_supported) return 'Wayland (hotkeys limited)';
-      if (pasteUnavailable) return 'Wayland (paste unavailable)';
-      if (pasteLimited) return 'Wayland (clipboard only)';
-      return 'Ready on Wayland';
-    }
-    if (runtimeInfo.session_type === 'x11') return 'Ready on X11';
+    $: statusLabel = (() => {
+      if (isRecording) return `Recording... ${formatElapsed(recordingSeconds)}`;
+      if (!runtimeInfo) return 'Ready';
+      if (runtimeInfo.session_type === 'wayland') {
+        if (pasteUnavailable) return 'Wayland (paste unavailable)';
+        if (pasteLimited) return 'Wayland (clipboard only)';
+        return 'Ready on Wayland';
+      }
+      if (runtimeInfo.session_type === 'x11') return 'Ready on X11';
     if (runtimeInfo.session_type === 'macos') return 'Ready on macOS';
     if (runtimeInfo.session_type === 'windows') return 'Ready on Windows';
     return 'Ready';
@@ -425,24 +473,36 @@
     searchLoading = false;
   }
 
-  const registerHotkeysSafely = async () => {
-    if (!settings) return;
-    hotkeyWarning = '';
+    const registerHotkeysSafely = async () => {
+      if (!settings) return;
+      hotkeyWarning = '';
 
-    if (runtimeInfo && !runtimeInfo.hotkeys_supported) {
-      hotkeyWarning = 'Global hotkeys are not supported on Wayland.';
-      return;
-    }
+      if (runtimeInfo && runtimeInfo.session_type === 'wayland' && !runtimeInfo.hotkeys_supported) {
+        if (!waylandHotkeysWarningDismissed) {
+          hotkeyWarning = WAYLAND_HOTKEYS_WARNING;
+        }
+        return;
+      }
 
     try {
       await registerHotkeys(settings, {
         onToggle: handleToggleRecording,
         onPasteLast: handlePasteLast,
       });
-    } catch (error) {
-      hotkeyWarning = error instanceof Error ? error.message : 'Failed to register hotkeys.';
-    }
-  };
+      } catch (error) {
+        hotkeyWarning = error instanceof Error ? error.message : 'Failed to register hotkeys.';
+      }
+    };
+
+    const dismissHotkeyWarning = () => {
+      if (hotkeyWarning === WAYLAND_HOTKEYS_WARNING) {
+        waylandHotkeysWarningDismissed = true;
+        try {
+          window.localStorage.setItem(WAYLAND_HOTKEYS_WARNING_DISMISSED_KEY, '1');
+        } catch {}
+      }
+      hotkeyWarning = '';
+    };
 
   const loadApp = async () => {
     try {
@@ -503,16 +563,30 @@
     }
   };
 
-  onMount(() => {
-    loadApp();
-    startRecordingListener();
-    startTranscriptListener();
-    startPreviewListener();
+    onMount(() => {
+      transcriptionCompleteAudio = new Audio(transcriptionCompleteSoundUrl);
+      transcriptionCompleteAudio.preload = 'auto';
+      transcriptionCompleteAudio.volume = 0.65;
+      try {
+        waylandHotkeysWarningDismissed = window.localStorage.getItem(WAYLAND_HOTKEYS_WARNING_DISMISSED_KEY) === '1';
+      } catch {}
+      loadApp();
+      startRecordingListener();
+      startTranscriptListener();
+      startPreviewListener();
     startModelProgressListener();
     startImportProgressListener();
     startOpenSettingsListener();
     startSettingsUpdatedListener();
     startAutomationErrorListener();
+    syncUiActive();
+    const onFocus = () => void syncUiActive();
+    const onBlur = () => void syncUiActive();
+    const onVisibility = () => void syncUiActive();
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+    document.addEventListener('visibilitychange', onVisibility);
+    startTranscriptionStartedListener();
 
     // Keep the titlebar back/forward buttons working even without a router.
     if (isNavState(window.history.state)) {
@@ -526,7 +600,15 @@
       }
     };
     window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
+    return () => {
+      window.removeEventListener('popstate', onPopState);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+      document.removeEventListener('visibilitychange', onVisibility);
+      try {
+        void setUiActive(false);
+      } catch {}
+    };
   });
 
   onDestroy(() => {
@@ -563,6 +645,10 @@
       unlistenAutomationError();
       unlistenAutomationError = null;
     }
+    if (unlistenTranscriptionStarted) {
+      unlistenTranscriptionStarted();
+      unlistenTranscriptionStarted = null;
+    }
     if (detailCopyTimer) {
       clearTimeout(detailCopyTimer);
       detailCopyTimer = null;
@@ -593,8 +679,10 @@
     try {
       const result = await toggleRecording();
       applyRecordingState(result.recording, result.recording ? Date.now() : null);
-      if (result.transcript && !transcripts.some((item) => item.id === result.transcript?.id)) {
-        transcripts = [result.transcript, ...transcripts];
+      if (result.transcript) {
+        if (!transcripts.some((item) => item.id === result.transcript?.id)) {
+          transcripts = [result.transcript, ...transcripts];
+        }
       }
     } catch (error) {
       isRecording = false;
@@ -1418,8 +1506,8 @@
           on:click={() => navigateTo('settings')}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M9.4 1l.45 2.4a2 2 0 0 1-1 2.05L7.2 6.2a2 2 0 0 1-2.02-.2L3.4 4.6l-2.4 4.2 1.8 1.4a2 2 0 0 1 .6 2.16l-.8 2.2a2 2 0 0 1-1.8 1.2H0v4h1.8a2 2 0 0 1 1.8 1.2l.8 2.2a2 2 0 0 1-.6 2.16l-1.8 1.4 2.4 4.2 1.78-1.4a2 2 0 0 1 2.02-.2l1.66.94a2 2 0 0 1 1 2.05L9.4 23h5.2l.45-2.4a2 2 0 0 1 1-2.05l1.66-.94a2 2 0 0 1 2.02.2l1.78 1.4 2.4-4.2-1.8-1.4a2 2 0 0 1-.6-2.16l.8-2.2a2 2 0 0 1 1.8-1.2H24v-4h-1.8a2 2 0 0 1-1.8-1.2l-.8-2.2a2 2 0 0 1 .6-2.16l1.8-1.4-2.4-4.2-1.78 1.4a2 2 0 0 1-2.02.2l-1.66-.94a2 2 0 0 1-1-2.05L14.6 1H9.4z" />
             <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01A1.65 1.65 0 0 0 20.91 10H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
           </svg>
           <span>Settings</span>
         </button>
@@ -1456,11 +1544,19 @@
                 </button>
               </div>
             {/if}
-            {#if hotkeyWarning}
-              <div class="banner info" role="status">
-                <span>{hotkeyWarning}</span>
-              </div>
-            {/if}
+              {#if hotkeyWarning}
+                <div class="banner info" role="status">
+                  <span>{hotkeyWarning}</span>
+                  <button
+                    class="banner-dismiss"
+                    type="button"
+                    on:click={dismissHotkeyWarning}
+                    aria-label="Dismiss hotkey warning"
+                  >
+                    x
+                  </button>
+                </div>
+              {/if}
             {#if updateAvailable && !updateDismissed}
               <div class="banner info" role="status">
                 <span>
@@ -1537,7 +1633,7 @@
               </div>
             </div>
 
-            {#if isRecording}
+            {#if isRecording && settings?.ui.live_preview_enabled}
               <div class="preview-card" aria-live="polite">
                 <div class="preview-header">
                   <span>Live preview</span>
@@ -1810,26 +1906,32 @@
                 </button>
               </div>
             {/if}
-            {#if hotkeyWarning}
-              <div class="banner info" role="status">
-                <span>{hotkeyWarning}</span>
-              </div>
-            {/if}
-
-            {#if settings}
-              {#if runtimeInfo && runtimeInfo.session_type === 'wayland'}
-                <div class="banner info">
-                  <span>
-                    Wayland detected. Install <code class="code-hint">wl-clipboard</code> for clipboard copy and
-                    <code class="code-hint">wtype</code> (or <code class="code-hint">ydotool</code>) for auto-paste.
-                    For GNOME global hotkeys, add custom shortcuts that run
-                    <code class="code-hint">whispr --toggle</code> and <code class="code-hint">whispr --paste-last</code>.
-                    {#if runtimeInfo.missing_helpers.length > 0}
-                      Missing: <code class="code-hint">{runtimeInfo.missing_helpers.join(', ')}</code>.
-                    {/if}
-                  </span>
+              {#if hotkeyWarning}
+                <div class="banner info" role="status">
+                  <span>{hotkeyWarning}</span>
+                  <button
+                    class="banner-dismiss"
+                    type="button"
+                    on:click={dismissHotkeyWarning}
+                    aria-label="Dismiss hotkey warning"
+                  >
+                    x
+                  </button>
                 </div>
               {/if}
+
+              {#if settings}
+                {#if runtimeInfo && runtimeInfo.session_type === 'wayland' && runtimeInfo.missing_helpers.length > 0}
+                  <div class="banner info" role="status">
+                    <span>
+                      Wayland detected. Install <code class="code-hint">wl-clipboard</code> for clipboard copy and
+                      <code class="code-hint">wtype</code> (or <code class="code-hint">ydotool</code>) for auto-paste.
+                      For GNOME global hotkeys, add custom shortcuts that run
+                      <code class="code-hint">whispr --toggle</code> and <code class="code-hint">whispr --paste-last</code>.
+                      Missing: <code class="code-hint">{runtimeInfo.missing_helpers.join(', ')}</code>.
+                    </span>
+                  </div>
+                {/if}
 
               <div class={`settings-section ${settingsFocus === 'hotkeys' ? 'focused' : ''}`} bind:this={hotkeysSectionEl}>
                 <h2>Hotkeys</h2>
@@ -1948,25 +2050,25 @@
                 <div class="model-list">
                   {#each models as model}
                     <div class="model-row">
-                      <div class="model-info">
-                        <div class="model-meta">
-                          <div class="model-name">
-                            <span>{model.label}</span>
-                            {#if model.active}
-                              <span class="model-badge">Active</span>
-                            {/if}
+                        <div class="model-info">
+                          <div class="model-meta">
+                            <div class="model-name">
+                              <span>{model.label}</span>
+                              {#if model.active && model.installed}
+                                <span class="model-badge">Active</span>
+                              {/if}
+                            </div>
+                            <div class="model-subtext">{model.id}</div>
                           </div>
-                          <div class="model-subtext">{model.id}</div>
                         </div>
-                      </div>
-                      <div class="model-actions">
-                        {#if model.active}
-                          <div class="model-icon-btn" aria-label="Active">
-                            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                              <path d="M4 10l3.5 3.5L16 6" />
-                            </svg>
-                          </div>
-                        {:else if model.installed}
+                        <div class="model-actions">
+                          {#if model.active && model.installed}
+                            <div class="model-icon-btn active-indicator" role="img" aria-label="Active" title="Active">
+                              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M4 10l3.5 3.5L16 6" />
+                              </svg>
+                            </div>
+                          {:else if model.installed}
                           <button
                             class="model-action-btn"
                             type="button"
@@ -2086,14 +2188,31 @@
                   </div>
                   <div class="settings-row">
                     <div class="settings-label">
-                      <label for="use-gpu">GPU acceleration</label>
-                      <p class="settings-hint">
-                        {performanceInfo?.gpu_supported
-                          ? 'Use GPU when available to speed up transcription.'
-                          : 'GPU acceleration is not available in this build.'}
-                      </p>
+                      <label for="live-preview">Live preview</label>
+                      <p class="settings-hint">Show partial transcription while recording (uses extra CPU).</p>
                     </div>
                     <div class="settings-control">
+                      <input
+                        id="live-preview"
+                        type="checkbox"
+                        bind:checked={settings.ui.live_preview_enabled}
+                      />
+                    </div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="settings-label">
+                        <label for="use-gpu">GPU acceleration</label>
+                        <p class="settings-hint">
+                          {performanceInfo?.gpu_supported
+                            ? 'Use GPU when available to speed up transcription.'
+                            : 'GPU acceleration is not available in this build.'}
+                          {#if performanceInfo?.gpu_name}
+                            <br />
+                            Detected: {performanceInfo.gpu_name}
+                          {/if}
+                        </p>
+                      </div>
+                      <div class="settings-control">
                       <input
                         id="use-gpu"
                         type="checkbox"
@@ -2623,20 +2742,20 @@
     </section>
   </div>
 
-	  <Onboarding
-	    open={onboardingOpen}
-	    step={onboardingStep}
-	    settings={settings}
-	    runtimeInfo={runtimeInfo}
-	    audioDevices={audioDevices}
-	    errorMessage={onboardingErrorMessage}
-	    on:advance={advanceOnboardingStep}
-	    on:selectAudioDevice={(event) => handleOnboardingAudioDeviceSelect(event.detail.id)}
-	    on:back={backOnboardingStep}
-	    on:skipStep={skipOnboardingStep}
-	    on:skipAll={skipOnboarding}
-	    on:finish={finishOnboarding}
-	  />
+    <Onboarding
+      open={onboardingOpen}
+      step={onboardingStep}
+      settings={settings}
+      runtimeInfo={runtimeInfo}
+      audioDevices={audioDevices}
+      errorMessage={onboardingErrorMessage}
+      on:advance={advanceOnboardingStep}
+      on:selectAudioDevice={(event) => handleOnboardingAudioDeviceSelect(event.detail.id)}
+      on:back={backOnboardingStep}
+      on:skipStep={skipOnboardingStep}
+      on:skipAll={skipOnboarding}
+      on:finish={finishOnboarding}
+    />
 
   <ConfirmDialog
     open={clearConfirmOpen}
@@ -2667,100 +2786,100 @@
     on:cancel={() => (deleteConfirmModel = null)}
   />
 
-	  <ConfirmDialog
-	    open={deleteConfirmTranscript !== null}
-	    title="Delete transcript?"
-	    message={`Delete "${deleteConfirmTranscript ? resolveTitle(deleteConfirmTranscript) : ''}"?`}
-	    confirmLabel="Delete"
-	    cancelLabel="Cancel"
-	    destructive={true}
-	    on:confirm={() => {
-	      if (deleteConfirmTranscript) {
-	        handleDeleteTranscript(deleteConfirmTranscript);
-	      }
-	      deleteConfirmTranscript = null;
-	    }}
-	    on:cancel={() => (deleteConfirmTranscript = null)}
-	  />
+    <ConfirmDialog
+      open={deleteConfirmTranscript !== null}
+      title="Delete transcript?"
+      message={`Delete "${deleteConfirmTranscript ? resolveTitle(deleteConfirmTranscript) : ''}"?`}
+      confirmLabel="Delete"
+      cancelLabel="Cancel"
+      destructive={true}
+      on:confirm={() => {
+        if (deleteConfirmTranscript) {
+          handleDeleteTranscript(deleteConfirmTranscript);
+        }
+        deleteConfirmTranscript = null;
+      }}
+      on:cancel={() => (deleteConfirmTranscript = null)}
+    />
 
-	  {#if wlClipboardInstallOpen}
-	    <div class="modal-backdrop" role="presentation">
-	      <button
-	        class="modal-dismiss"
-	        type="button"
-	        aria-label="Close wl-clipboard install"
-	        on:click={closeWlClipboardInstall}
-	      ></button>
-	      <div
-	        class="modal-card helper-install"
-	        role="dialog"
-	        aria-modal="true"
-	        aria-labelledby="wlcb-title"
-	      >
-	        <div class="modal-header">
-	          <div>
-	            <h2 id="wlcb-title">Install wl-clipboard</h2>
-	            <p class="modal-summary">
-	              Needed on Wayland for clipboard integration. This installs <code class="code-hint">wl-copy</code> and
-	              <code class="code-hint">wl-paste</code>.
-	            </p>
-	          </div>
-	          <button class="icon-button" type="button" aria-label="Close" on:click={closeWlClipboardInstall}>
-	            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-	              <path d="M18 6L6 18" />
-	              <path d="M6 6l12 12" />
-	            </svg>
-	          </button>
-	        </div>
-	        <div class="modal-body">
-	          <div class="helper-install-list">
-	            {#each wlClipboardInstallCommands as entry}
-	              <div class="helper-install-item">
-	                <div class="helper-install-row">
-	                  <span class="helper-install-label">{entry.label}</span>
-	                  <button
-	                    class="btn-tertiary"
-	                    type="button"
-	                    on:click={() => copyInstallCommand(entry.command)}
-	                  >
-	                    Copy
-	                  </button>
-	                </div>
-	                <pre class="helper-install-code"><code>{entry.command}</code></pre>
-	              </div>
-	            {/each}
-	          </div>
-	          {#if wlClipboardCopyError}
-	            <p class="helper-install-error">{wlClipboardCopyError} Select the command above and copy it manually.</p>
-	          {/if}
-	          <p class="settings-hint">After installing, relaunch Whispr to re-detect helpers.</p>
-	        </div>
-	        <div class="modal-footer">
-	          <div class="modal-actions">
-	            <button class="btn-secondary" type="button" on:click={closeWlClipboardInstall}>Close</button>
-	            <button
-	              class="btn-primary"
-	              type="button"
-	              on:click={async () => {
-	                try {
-	                  await relaunch();
-	                } catch (error) {
-	                  wlClipboardCopyError = error instanceof Error ? error.message : 'Failed to relaunch.';
-	                }
-	              }}
-	            >
-	              Relaunch app
-	            </button>
-	          </div>
-	        </div>
-	      </div>
-	    </div>
-	  {/if}
+    {#if wlClipboardInstallOpen}
+      <div class="modal-backdrop" role="presentation">
+        <button
+          class="modal-dismiss"
+          type="button"
+          aria-label="Close wl-clipboard install"
+          on:click={closeWlClipboardInstall}
+        ></button>
+        <div
+          class="modal-card helper-install"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="wlcb-title"
+        >
+          <div class="modal-header">
+            <div>
+              <h2 id="wlcb-title">Install wl-clipboard</h2>
+              <p class="modal-summary">
+                Needed on Wayland for clipboard integration. This installs <code class="code-hint">wl-copy</code> and
+                <code class="code-hint">wl-paste</code>.
+              </p>
+            </div>
+            <button class="icon-button" type="button" aria-label="Close" on:click={closeWlClipboardInstall}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 6L6 18" />
+                <path d="M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <div class="modal-body">
+            <div class="helper-install-list">
+              {#each wlClipboardInstallCommands as entry}
+                <div class="helper-install-item">
+                  <div class="helper-install-row">
+                    <span class="helper-install-label">{entry.label}</span>
+                    <button
+                      class="btn-tertiary"
+                      type="button"
+                      on:click={() => copyInstallCommand(entry.command)}
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <pre class="helper-install-code"><code>{entry.command}</code></pre>
+                </div>
+              {/each}
+            </div>
+            {#if wlClipboardCopyError}
+              <p class="helper-install-error">{wlClipboardCopyError} Select the command above and copy it manually.</p>
+            {/if}
+            <p class="settings-hint">After installing, relaunch Whispr to re-detect helpers.</p>
+          </div>
+          <div class="modal-footer">
+            <div class="modal-actions">
+              <button class="btn-secondary" type="button" on:click={closeWlClipboardInstall}>Close</button>
+              <button
+                class="btn-primary"
+                type="button"
+                on:click={async () => {
+                  try {
+                    await relaunch();
+                  } catch (error) {
+                    wlClipboardCopyError = error instanceof Error ? error.message : 'Failed to relaunch.';
+                  }
+                }}
+              >
+                Relaunch app
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    {/if}
 
-	  {#if expandedTranscript}
-	    <div class="modal-backdrop" role="presentation">
-	      <button
-	        class="modal-dismiss"
+    {#if expandedTranscript}
+      <div class="modal-backdrop" role="presentation">
+        <button
+          class="modal-dismiss"
         type="button"
         aria-label="Close transcript details"
         on:click={closeTranscriptDetail}

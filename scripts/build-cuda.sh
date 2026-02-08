@@ -12,6 +12,12 @@ elif [ -n "${CUDA_ARCH:-}" ]; then
   echo "Using CUDA_ARCH override: ${CMAKE_CUDA_ARCHITECTURES}"
 else
   mapfile -t supported_archs < <(nvcc --list-gpu-arch 2>/dev/null | sed "s/compute_//")
+
+  if [ "${#supported_archs[@]}" -eq 0 ]; then
+    echo "::error::nvcc --list-gpu-arch returned no architectures. Is CUDA installed correctly?"
+    exit 1
+  fi
+
   detected_arch=""
 
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -39,5 +45,4 @@ else
   fi
 fi
 
-npm run build
 npm run tauri -- build --features cuda

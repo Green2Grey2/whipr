@@ -1,6 +1,6 @@
 [package]
 name = "whispr"
-version = "0.2.0"
+version = "0.2.1"
 description = "Whispr Linux alternative"
 authors = ["greenuni"]
 edition = "2021"
@@ -31,6 +31,9 @@ tauri-plugin-process = "2"
 [target.'cfg(target_os = "linux")'.dependencies]
 alsa = "0.9"
 alsa-sys = "0.3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_System_Com"] }
 
 [features]
 _gpu = ["whisper-rs/_gpu"]

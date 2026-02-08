@@ -85,6 +85,7 @@ pub struct AppSettings {
 pub struct UiSettings {
     pub list_compact: bool,
     pub onboarding_seen: bool,
+    pub live_preview_enabled: bool,
 }
 
 fn default_data_dir_path() -> PathBuf {
@@ -181,6 +182,7 @@ impl Default for Settings {
             ui: UiSettings {
                 list_compact: false,
                 onboarding_seen: false,
+                live_preview_enabled: true,
             },
         }
     }

@@ -278,6 +278,10 @@ fn settings_entries(settings: &Settings) -> Vec<(&'static str, Value)> {
         ("app.close_to_tray", json!(settings.app.close_to_tray)),
         ("ui.list_compact", json!(settings.ui.list_compact)),
         ("ui.onboarding_seen", json!(settings.ui.onboarding_seen)),
+        (
+            "ui.live_preview_enabled",
+            json!(settings.ui.live_preview_enabled),
+        ),
     ]
 }
 
@@ -322,6 +326,7 @@ fn apply_setting(settings: &mut Settings, key: &str, value: Value) {
         "app.close_to_tray" => assign(&mut settings.app.close_to_tray, value),
         "ui.list_compact" => assign(&mut settings.ui.list_compact, value),
         "ui.onboarding_seen" => assign(&mut settings.ui.onboarding_seen, value),
+        "ui.live_preview_enabled" => assign(&mut settings.ui.live_preview_enabled, value),
         _ => {}
     }
 }

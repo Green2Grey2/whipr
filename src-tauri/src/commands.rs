@@ -42,6 +42,11 @@ struct PreviewEvent {
     text: String,
 }
 
+fn emit_transcription_started(app: &AppHandle) {
+    // UI uses this as a cue that recording has stopped and transcription is beginning.
+    let _ = app.emit("transcription-started", true);
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TranscriptUpdate {
     text: Option<String>,
@@ -69,8 +74,13 @@ struct AutomationErrorEvent {
     message: String,
 }
 
-const PREVIEW_INTERVAL_MS: u64 = 4500;
 const PREVIEW_MIN_SECONDS: f32 = 1.2;
+const PREVIEW_INACTIVE_POLL_MS: u64 = 650;
+const PREVIEW_INTERVAL_CPU_MS: u64 = 7000;
+const PREVIEW_INTERVAL_GPU_MS: u64 = 4500;
+const PREVIEW_INTERVAL_MIN_MS: u64 = 3000;
+const PREVIEW_INTERVAL_MAX_MS: u64 = 12000;
+const PREVIEW_BACKLOG_SECONDS: f32 = 12.0;
 
 fn emit_recording_event(app: &AppHandle, outcome: &ToggleOutcome) {
     let payload = RecordingEvent {
@@ -100,7 +110,7 @@ fn stop_preview_thread(state: &Mutex<AppState>) {
 }
 
 fn start_preview_thread(app: AppHandle, state: &Mutex<AppState>) {
-    let (audio_tx, settings, cancel) = {
+    let (audio_tx, settings, cancel, ui_active) = {
         let mut guard = match state.lock() {
             Ok(guard) => guard,
             Err(_) => return,
@@ -110,7 +120,12 @@ fn start_preview_thread(app: AppHandle, state: &Mutex<AppState>) {
         }
         let cancel = Arc::new(AtomicBool::new(false));
         guard.preview_cancel = Some(cancel.clone());
-        (guard.audio_tx.clone(), guard.settings.clone(), cancel)
+        (
+            guard.audio_tx.clone(),
+            guard.settings.clone(),
+            cancel,
+            guard.ui_active.clone(),
+        )
     };
 
     std::thread::spawn(move || {
@@ -120,10 +135,32 @@ fn start_preview_thread(app: AppHandle, state: &Mutex<AppState>) {
         };
         let mut cursor = 0_usize;
         let mut preview = String::new();
+        let wants_gpu = settings.transcription.use_gpu && cfg!(feature = "_gpu");
+        let mut interval_ms = if wants_gpu {
+            PREVIEW_INTERVAL_GPU_MS
+        } else {
+            PREVIEW_INTERVAL_CPU_MS
+        };
 
         loop {
             if cancel.load(Ordering::Relaxed) {
                 break;
+            }
+
+            if !ui_active.load(Ordering::Relaxed) {
+                // UI isn't visible/focused; avoid expensive snapshot+inference.
+                // Keep cursor near the tail so we won't allocate huge snapshots if UI becomes
+                // active mid-recording.
+                if let Ok(stats) = audio::stats(&audio_tx) {
+                    let keep = ((stats.sample_rate as f32)
+                        * (stats.channels as f32).max(1.0)
+                        * PREVIEW_BACKLOG_SECONDS)
+                        .round()
+                        .max(0.0) as usize;
+                    cursor = stats.total_samples.saturating_sub(keep);
+                }
+                std::thread::sleep(Duration::from_millis(PREVIEW_INACTIVE_POLL_MS));
+                continue;
             }
 
             let snapshot = match audio::snapshot_audio(&audio_tx, cursor) {
@@ -132,7 +169,8 @@ fn start_preview_thread(app: AppHandle, state: &Mutex<AppState>) {
             };
 
             if snapshot.samples.is_empty() {
-                std::thread::sleep(Duration::from_millis(PREVIEW_INTERVAL_MS));
+                interval_ms = (interval_ms + 500).min(PREVIEW_INTERVAL_MAX_MS);
+                std::thread::sleep(Duration::from_millis(interval_ms));
                 continue;
             }
 
@@ -141,7 +179,8 @@ fn start_preview_thread(app: AppHandle, state: &Mutex<AppState>) {
             let seconds = snapshot.samples.len() as f32
                 / (snapshot.sample_rate as f32 * snapshot.channels as f32).max(1.0);
             if seconds < PREVIEW_MIN_SECONDS {
-                std::thread::sleep(Duration::from_millis(PREVIEW_INTERVAL_MS));
+                interval_ms = (interval_ms + 250).min(PREVIEW_INTERVAL_MAX_MS);
+                std::thread::sleep(Duration::from_millis(interval_ms));
                 continue;
             }
 
@@ -151,6 +190,7 @@ fn start_preview_thread(app: AppHandle, state: &Mutex<AppState>) {
                 channels: snapshot.channels,
             };
 
+            let started = Instant::now();
             match transcription::transcribe_preview_with_context(&ctx, &settings, audio) {
                 Ok(chunk) => {
                     let chunk = chunk.trim();
@@ -170,7 +210,17 @@ fn start_preview_thread(app: AppHandle, state: &Mutex<AppState>) {
                 }
             }
 
-            std::thread::sleep(Duration::from_millis(PREVIEW_INTERVAL_MS));
+            // Dynamic interval:
+            // - Back off on slow inference (CPU-only systems) to avoid pegging cores.
+            // - Speed up a bit when inference is fast and we have enough audio.
+            let took_ms = started.elapsed().as_millis() as u64;
+            if took_ms >= interval_ms.saturating_sub(250) {
+                interval_ms = (took_ms + 1250).min(PREVIEW_INTERVAL_MAX_MS);
+            } else if seconds >= 3.0 && took_ms < 600 {
+                interval_ms = interval_ms.saturating_sub(500).max(PREVIEW_INTERVAL_MIN_MS);
+            }
+
+            std::thread::sleep(Duration::from_millis(interval_ms));
         }
     });
 }
@@ -235,6 +285,16 @@ pub fn get_settings(state: State<'_, Mutex<AppState>>) -> Result<Settings, Strin
         .lock()
         .map_err(|_| "state lock poisoned".to_string())?;
     Ok(guard.settings.clone())
+}
+
+#[tauri::command]
+pub fn set_ui_active(state: State<'_, Mutex<AppState>>, active: bool) -> Result<bool, String> {
+    let ui_active = state
+        .lock()
+        .map(|guard| guard.ui_active.clone())
+        .map_err(|_| "state lock poisoned".to_string())?;
+    ui_active.store(active, Ordering::Relaxed);
+    Ok(true)
 }
 
 #[tauri::command]
@@ -714,6 +774,7 @@ pub fn get_performance_info(state: State<'_, Mutex<AppState>>) -> PerformanceInf
         .map(|guard| guard.settings.clone())
         .unwrap_or_else(|_| Settings::default());
     let gpu_supported = cfg!(feature = "_gpu");
+    let gpu_name = transcription::detect_gpu_name();
     let gpu_error = if settings.transcription.use_gpu && gpu_supported {
         transcription::last_gpu_error()
     } else {
@@ -727,6 +788,7 @@ pub fn get_performance_info(state: State<'_, Mutex<AppState>>) -> PerformanceInf
         gpu_enabled,
         thread_count,
         gpu_error,
+        gpu_name,
     }
 }
 
@@ -863,7 +925,10 @@ pub fn list_audio_devices() -> Vec<AudioDevice> {
     audio::list_input_devices()
 }
 
-fn toggle_recording_with_state(state: &Mutex<AppState>) -> Result<ToggleOutcome, String> {
+fn toggle_recording_with_state(
+    app: &AppHandle,
+    state: &Mutex<AppState>,
+) -> Result<ToggleOutcome, String> {
     let mut guard = state
         .lock()
         .map_err(|_| "state lock poisoned".to_string())?;
@@ -930,6 +995,10 @@ fn toggle_recording_with_state(state: &Mutex<AppState>) -> Result<ToggleOutcome,
         }
     };
     let _ = overlay::write_state(false, None, Some(0.0));
+
+    // Fire immediately after recording has stopped and we have audio to transcribe.
+    emit_transcription_started(app);
+
     let audio_for_save = if settings.storage.keep_audio {
         Some(audio.clone())
     } else {
@@ -998,9 +1067,15 @@ pub fn toggle_recording_with_state_and_emit(
     app: &AppHandle,
     state: &Mutex<AppState>,
 ) -> Result<ToggleResult, String> {
-    let outcome = toggle_recording_with_state(state)?;
+    let outcome = toggle_recording_with_state(app, state)?;
     if outcome.result.recording {
-        start_preview_thread(app.clone(), state);
+        let preview_enabled = state
+            .lock()
+            .map(|guard| guard.settings.ui.live_preview_enabled)
+            .unwrap_or(true);
+        if preview_enabled {
+            start_preview_thread(app.clone(), state);
+        }
     } else {
         stop_preview_thread(state);
         emit_preview_event(app, String::new());

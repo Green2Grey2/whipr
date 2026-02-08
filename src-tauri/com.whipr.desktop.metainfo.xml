@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop">
-  <id>com.whipr.app</id>
+  <id>com.whipr.desktop</id>
   <name>Whipr</name>
   <summary>Fast, private voice transcription</summary>
 

@@ -1130,10 +1130,24 @@ kbd {
 }
 
 .model-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 6px;
   border-radius: 8px;
   color: var(--ink-2);
   transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.model-icon-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.model-icon-btn.active-indicator {
+  /* Don't hide the "active" affordance behind hover. */
+  color: var(--ink-1);
+  background: var(--surface-active);
 }
 
 .download-progress {

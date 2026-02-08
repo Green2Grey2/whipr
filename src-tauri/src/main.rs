@@ -51,6 +51,7 @@ fn main() {
             commands::ping,
             commands::get_default_settings,
             commands::get_settings,
+            commands::set_ui_active,
             commands::set_audio_input_device,
             commands::save_settings,
             commands::list_transcripts,

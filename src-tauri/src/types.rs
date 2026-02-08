@@ -35,6 +35,8 @@ pub struct PerformanceInfo {
     pub thread_count: u32,
     #[serde(default)]
     pub gpu_error: Option<String>,
+    #[serde(default)]
+    pub gpu_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

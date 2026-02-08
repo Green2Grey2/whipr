@@ -28,6 +28,7 @@ pub struct AudioDevice {
 pub enum AudioCommand {
     Start(AudioSettings, i64, mpsc::Sender<Result<(), String>>),
     Snapshot(usize, mpsc::Sender<Result<AudioSnapshot, String>>),
+    Stats(mpsc::Sender<Result<AudioStats, String>>),
     Stop(mpsc::Sender<Result<RecordedAudio, String>>),
 }
 
@@ -70,6 +71,14 @@ pub fn start_worker() -> mpsc::Sender<AudioCommand> {
                         let _ = reply.send(Err("No active recorder found".to_string()));
                     }
                 },
+                AudioCommand::Stats(reply) => match recorder.as_ref() {
+                    Some(active) => {
+                        let _ = reply.send(Ok(active.stats()));
+                    }
+                    None => {
+                        let _ = reply.send(Err("No active recorder found".to_string()));
+                    }
+                },
             }
         }
     });
@@ -104,6 +113,15 @@ pub fn snapshot_audio(
 ) -> Result<AudioSnapshot, String> {
     let (reply_tx, reply_rx) = mpsc::channel();
     tx.send(AudioCommand::Snapshot(from_index, reply_tx))
+        .map_err(|_| "Audio worker unavailable".to_string())?;
+    reply_rx
+        .recv()
+        .map_err(|_| "Audio worker unavailable".to_string())?
+}
+
+pub fn stats(tx: &mpsc::Sender<AudioCommand>) -> Result<AudioStats, String> {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    tx.send(AudioCommand::Stats(reply_tx))
         .map_err(|_| "Audio worker unavailable".to_string())?;
     reply_rx
         .recv()
@@ -315,6 +333,13 @@ pub struct AudioSnapshot {
     pub total_samples: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct AudioStats {
+    pub total_samples: usize,
+    pub sample_rate: u32,
+    pub channels: u16,
+}
+
 // Single-producer (CPAL callback) and single-reader (audio worker thread).
 // Uses atomic slots so the callback never takes a mutex.
 struct AudioRingBuffer {
@@ -341,19 +366,24 @@ impl AudioRingBuffer {
             return;
         }
 
+        let cap = self.cap;
         let mut head = self.head.load(Ordering::Relaxed);
+        let mut idx = head % cap;
         for &sample in input {
-            let idx = head % self.cap;
             self.data[idx].store(sample.to_bits(), Ordering::Relaxed);
             head = head.wrapping_add(1);
+            idx += 1;
+            if idx == cap {
+                idx = 0;
+            }
         }
 
         self.head.store(head, Ordering::Release);
 
         let tail = self.tail.load(Ordering::Relaxed);
         let len = head.saturating_sub(tail);
-        if len > self.cap {
-            self.tail.store(head - self.cap, Ordering::Release);
+        if len > cap {
+            self.tail.store(head - cap, Ordering::Release);
         }
     }
 
@@ -391,11 +421,16 @@ impl AudioRingBuffer {
             };
 
             let mut out = Vec::with_capacity(len.saturating_sub(start));
-            for offset in start..len {
-                let abs = base + offset;
-                let idx = abs % cap;
+            let start_abs = base + start;
+            let end_abs = base + len;
+            let mut idx = start_abs % cap;
+            for _abs in start_abs..end_abs {
                 let bits = data[idx].load(Ordering::Relaxed);
                 out.push(f32::from_bits(bits));
+                idx += 1;
+                if idx == cap {
+                    idx = 0;
+                }
             }
 
             // Detect stale reads: if the producer advanced tail past our base (or head
@@ -414,6 +449,44 @@ impl AudioRingBuffer {
 
         // Give up rather than returning potentially corrupted samples.
         (Vec::new(), self.head.load(Ordering::Acquire))
+    }
+
+    fn total_samples(&self) -> usize {
+        self.head.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+mod ring_tests {
+    use super::AudioRingBuffer;
+
+    #[test]
+    fn ring_snapshot_returns_all_when_from_is_zero() {
+        let ring = AudioRingBuffer::new(8);
+        ring.push_slice(&[1.0, 2.0, 3.0]);
+        let (samples, total) = ring.snapshot_from(0);
+        assert_eq!(total, 3);
+        assert_eq!(samples, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn ring_snapshot_from_cursor_returns_incremental() {
+        let ring = AudioRingBuffer::new(8);
+        ring.push_slice(&[1.0, 2.0, 3.0, 4.0]);
+        let (_samples, cursor) = ring.snapshot_from(0);
+        ring.push_slice(&[5.0, 6.0]);
+        let (samples, total) = ring.snapshot_from(cursor);
+        assert_eq!(total, 6);
+        assert_eq!(samples, vec![5.0, 6.0]);
+    }
+
+    #[test]
+    fn ring_overwrite_keeps_latest_cap_samples() {
+        let ring = AudioRingBuffer::new(4);
+        ring.push_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let (samples, total) = ring.snapshot_from(0);
+        assert_eq!(total, 6);
+        assert_eq!(samples, vec![3.0, 4.0, 5.0, 6.0]);
     }
 }
 
@@ -578,6 +651,14 @@ impl Recorder {
             channels: self.channels,
             total_samples,
         })
+    }
+
+    pub fn stats(&self) -> AudioStats {
+        AudioStats {
+            total_samples: self.samples.total_samples(),
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+        }
     }
 }
 

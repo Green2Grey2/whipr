@@ -89,5 +89,5 @@ rm -rf ~/.local/share/gnome-shell/extensions/whispr-overlay@greenuni
 
 ## Requirements
 
-- GNOME Shell 45+
+- GNOME Shell 45-49 (metadata currently declares compatibility for these versions)
 - Whipr binary accessible via PATH or configured path

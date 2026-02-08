@@ -57,7 +57,8 @@ pub fn list_models(settings: &Settings) -> Vec<ModelInfo> {
                 id: model.id.to_string(),
                 label: model.label.to_string(),
                 installed,
-                active: settings.transcription.model == model.id,
+                // Only mark a model as active when it is usable.
+                active: installed && settings.transcription.model == model.id,
             }
         })
         .collect()

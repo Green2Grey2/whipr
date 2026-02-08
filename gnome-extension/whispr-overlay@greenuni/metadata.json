@@ -2,6 +2,6 @@
   "uuid": "whispr-overlay@greenuni",
   "name": "Whispr Overlay",
   "description": "Bottom-center recording status pill for Whispr.",
-  "shell-version": ["46"],
-  "version": 1
+  "shell-version": ["45", "46", "47", "48", "49"],
+  "version": 2
 }

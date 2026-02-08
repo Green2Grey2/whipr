@@ -46,6 +46,7 @@ export type Settings = {
   ui: {
     list_compact: boolean;
     onboarding_seen: boolean;
+    live_preview_enabled: boolean;
   };
 };
 
@@ -106,6 +107,7 @@ export type PerformanceInfo = {
   gpu_enabled: boolean;
   thread_count: number;
   gpu_error?: string | null;
+  gpu_name?: string | null;
 };
 
 export type BenchmarkResult = {
@@ -139,8 +141,10 @@ export type AudioDevice = {
 
 export const getDefaultSettings = () => invoke<Settings>('get_default_settings');
 export const getSettings = () => invoke<Settings>('get_settings');
+export const setUiActive = (active: boolean) => invoke<boolean>('set_ui_active', { active });
 export const saveSettings = (settings: Settings) => invoke<Settings>('save_settings', { settings });
 export const setAudioInputDevice = (inputDeviceId: string) =>
+  // Command arg keys must match the Rust parameter names.
   invoke<Settings>('set_audio_input_device', { input_device_id: inputDeviceId });
 
 export const listTranscripts = () => invoke<Transcript[]>('list_transcripts');
