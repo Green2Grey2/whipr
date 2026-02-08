@@ -1,4 +1,6 @@
+#[cfg(target_os = "linux")]
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 
 pub fn apply_launch_on_login(enabled: bool) -> Result<(), String> {
