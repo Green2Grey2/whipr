@@ -32,3 +32,5 @@ coverage/
 # Temporary
 *.tmp
 *.temp
+.claude/settings.json
+.claude/hooks/format-rust.sh
